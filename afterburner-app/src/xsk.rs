@@ -6,6 +6,7 @@ use std::os::fd::{AsRawFd, RawFd};
 use std::ptr;
 use std::sync::atomic::{AtomicU32, Ordering};
 
+// Kernel Constants
 const SOL_XDP: i32 = 283;
 // Options for setsockopt
 const XDP_MMAP_OFFSETS: i32 = 1;
@@ -58,8 +59,8 @@ struct XdpRing {
 }
 
 pub struct XdpSocket {
-    fd: RawFd,
-    umem_ptr: *mut u8,
+    pub fd: RawFd,
+    pub umem_ptr: *mut u8,
     umem_layout: Layout,
     rx_ring: XdpRing,
     fill_ring: XdpRing,
@@ -77,7 +78,7 @@ impl XdpSocket {
                 return Err(anyhow::anyhow!("Failed to create AF_XDP socket"));
             }
 
-            // Allocates Aligned Memory
+            // Allocates Aligned Memory (UMEM)
             let frame_size = 2048;
             let frame_count = 4096;
             let mem_size = frame_count * frame_size;
@@ -287,30 +288,28 @@ impl XdpSocket {
     }
 
     // RX Ring: "Any new packets for me?"
-    pub fn poll_rx(&mut self) -> Option<(u32, usize)> {
+    pub fn poll_rx(&mut self) -> Option<(u64, usize)> {
         unsafe {
-            // 1. Check if Producer (Kernel) has moved past Consumer (Us)
             let rx_prod = (&*self.rx_ring.producer).load(Ordering::Acquire);
             let rx_cons = (&*self.rx_ring.consumer).load(Ordering::Relaxed);
 
             if rx_prod == rx_cons {
-                return None; // No packets
+                return None;
             }
 
-            // 2. Read Packet Metadata
             let idx = rx_cons & (self.rx_ring.size - 1);
             let desc_ptr = self.rx_ring.desc.add((idx as usize) * 16);
+
+            // We read the 'addr' (offset) and 'len' from the descriptor
             let addr = *(desc_ptr as *const u64);
             let len = *(desc_ptr.add(8) as *const u32);
 
-            // 3. Mark packet as consumed
             (&*self.rx_ring.consumer).store(rx_cons + 1, Ordering::Release);
 
-            // 4. RECYCLE: Immediately give the buffer back to Fill Ring
+            // Recycle buffer to Fill Ring
             let fill_prod = &*self.fill_ring.producer;
             let mut fill_prod_idx = fill_prod.load(Ordering::Relaxed);
 
-            // Check for space using cached consumer
             if fill_prod_idx - self.fill_ring.cached_cons >= self.fill_ring.size {
                 self.fill_ring.cached_cons = (&*self.fill_ring.consumer).load(Ordering::Acquire);
             }
@@ -318,11 +317,11 @@ impl XdpSocket {
             if fill_prod_idx - self.fill_ring.cached_cons < self.fill_ring.size {
                 let fill_idx = fill_prod_idx & (self.fill_ring.size - 1);
                 let fill_desc = (self.fill_ring.desc as *mut u64).offset(fill_idx as isize);
-                *fill_desc = addr; // Reuse the exact same buffer address
+                *fill_desc = addr; // Recycle the same address
                 fill_prod.store(fill_prod_idx + 1, Ordering::Release);
             }
 
-            Some((1, len as usize))
+            Some((addr, len as usize))
         }
     }
 }

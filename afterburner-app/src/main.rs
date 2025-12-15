@@ -82,20 +82,33 @@ async fn main() -> Result<(), anyhow::Error> {
     let mut packet_count = 0;
 
     while !term.load(Ordering::Relaxed) {
-        // Poll for 1 packet
+        // match on (address, length)
         match socket.poll_rx() {
-            Some((_count, len)) => {
+            Some((addr, len)) => {
                 packet_count += 1;
-                print!(".");
-                use std::io::Write;
-                std::io::stdout().flush().unwrap();
 
-                if packet_count % 100 == 0 {
-                    println!(" [{} pkts, last size: {}]", packet_count, len);
+                // base_address + packet_offset = packet_data
+                let packet_ptr = unsafe { socket.umem_ptr.add(addr as usize) };
+
+                let raw_data = unsafe { std::slice::from_raw_parts(packet_ptr, len) };
+
+                // Header Parsing (IPv4 + UDP = 42 bytes)
+                if len > 42 {
+                    let payload = &raw_data[42..];
+
+                    if let Ok(msg) = std::str::from_utf8(payload) {
+                        print!(
+                            "\rPacket #{}: [Len: {}] Data: {}",
+                            packet_count,
+                            len,
+                            msg.trim()
+                        );
+                        use std::io::Write;
+                        std::io::stdout().flush().unwrap();
+                    }
                 }
             }
             None => {
-                // If no packets, Sleep 1ms to save CPU (Remove this line for max performance)
                 std::thread::sleep(Duration::from_millis(1));
             }
         }
