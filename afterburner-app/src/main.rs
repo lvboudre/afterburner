@@ -78,38 +78,70 @@ async fn main() -> Result<(), anyhow::Error> {
         term_c.store(true, Ordering::Relaxed);
     });
 
-    let mut packet_count = 0;
+    const HEADER_SIZE: usize = 42;
+    const SIG_SIZE: usize = 64;
+    const PUBKEY_SIZE: usize = 32;
+
+    let mut packet_count: u64 = 0;
 
     while !term.load(Ordering::Relaxed) {
         match socket.poll_rx() {
             Some((addr, len)) => {
                 packet_count += 1;
 
-                // Pointer Arithmetic
                 let packet_ptr = unsafe { socket.umem_ptr.add(addr as usize) };
                 let raw_data = unsafe { std::slice::from_raw_parts(packet_ptr, len) };
 
-                // Skip Headers (Ethernet 14 + IP 20 + UDP 8 = 42 bytes)
-                if len > 42 {
-                    let payload = &raw_data[42..];
+                if len > HEADER_SIZE {
+                    let mut cursor = HEADER_SIZE;
 
-                    // Zero-Copy Parsing
-                    if payload.len() > 0 {
-                        // Byte 0 is Signature Count (assuming standard Compact-u16 < 127)
-                        let num_sigs = payload[0];
+                    if cursor < len {
+                        // 1. Skip Signatures
+                        let num_sigs = raw_data[cursor] as usize;
+                        cursor += 1;
+                        cursor += num_sigs * SIG_SIZE;
 
-                        // Bytes 1..65 are the First Signature (64 bytes)
-                        if payload.len() >= 65 {
-                            let sig_bytes = &payload[1..65];
+                        // 2. Skip Message Header (3 bytes)
+                        cursor += 3;
 
-                            print!("Pkt #{}: [Sigs: {}] First Sig: ", packet_count, num_sigs);
-                            // Print first 8 bytes of signature
-                            for b in sig_bytes.iter().take(8) {
-                                print!("{:02x}", b);
+                        // 3. Skip Accounts
+                        if cursor < len {
+                            let num_accounts = raw_data[cursor] as usize;
+                            cursor += 1;
+                            cursor += num_accounts * PUBKEY_SIZE;
+
+                            // 4. Skip Blockhash (32 bytes)
+                            cursor += 32;
+
+                            // 5. Parse Instructions
+                            if cursor < len {
+                                let _num_instructions = raw_data[cursor];
+                                cursor += 1;
+
+                                // Parse First Instruction Only
+                                if cursor + 2 < len {
+                                    let _prog_id_idx = raw_data[cursor];
+                                    let acc_indices_len = raw_data[cursor + 1] as usize;
+
+                                    cursor += 2 + acc_indices_len;
+
+                                    if cursor < len {
+                                        let data_len = raw_data[cursor] as usize;
+                                        cursor += 1;
+
+                                        if cursor + data_len <= len {
+                                            let instruction_data =
+                                                &raw_data[cursor..cursor + data_len];
+                                            print!("Packet #{}: Instruction: ", packet_count);
+
+                                            for b in instruction_data {
+                                                print!("{:02X} ", b);
+                                            }
+                                            println!();
+                                        }
+                                    }
+                                }
                             }
-                            println!("...");
-                        } else {
-                            println!("Pkt #{}: Malformed (Too short)", packet_count);
                         }
                     }
                 }

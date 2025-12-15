@@ -10,7 +10,7 @@ fn main() -> Result<(), anyhow::Error> {
 
     let status = Command::new("cargo")
         .current_dir(root)
-        .args(&[
+        .args([
             "build",
             "--package",
             "afterburner-ebpf",

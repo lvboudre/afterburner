@@ -2,7 +2,7 @@ use anyhow::{Context, Result};
 use std::alloc::{alloc, dealloc, Layout};
 use std::ffi::CString;
 use std::mem;
-use std::os::fd::{AsRawFd, RawFd};
+use std::os::fd::RawFd;
 use std::ptr;
 use std::sync::atomic::{AtomicU32, Ordering};
 
@@ -308,7 +308,7 @@ impl XdpSocket {
 
             // Recycle buffer to Fill Ring
             let fill_prod = &*self.fill_ring.producer;
-            let mut fill_prod_idx = fill_prod.load(Ordering::Relaxed);
+            let fill_prod_idx = fill_prod.load(Ordering::Relaxed);
 
             if fill_prod_idx - self.fill_ring.cached_cons >= self.fill_ring.size {
                 self.fill_ring.cached_cons = (&*self.fill_ring.consumer).load(Ordering::Acquire);
@@ -317,7 +317,7 @@ impl XdpSocket {
             if fill_prod_idx - self.fill_ring.cached_cons < self.fill_ring.size {
                 let fill_idx = fill_prod_idx & (self.fill_ring.size - 1);
                 let fill_desc = (self.fill_ring.desc as *mut u64).offset(fill_idx as isize);
-                *fill_desc = addr; // Recycle the same address
+                *fill_desc = addr;
                 fill_prod.store(fill_prod_idx + 1, Ordering::Release);
             }
 

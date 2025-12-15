@@ -21,19 +21,17 @@ fn main() {
 
     loop {
         // 'send' is faster than 'send_to' because the OS skips route lookup
-        if let Err(_) = socket.send(&buf) {
+        if socket.send(&buf).is_err() {
             break;
         }
 
         count += 1;
 
         // Log stats sparingly (checking time is expensive)
-        if count % 10000 == 0 {
-            if last_log.elapsed() >= Duration::from_secs(1) {
-                println!("Sender Speed: {} PPS", count);
-                count = 0;
-                last_log = Instant::now();
-            }
+        if count % 10000 == 0 && last_log.elapsed() >= Duration::from_secs(1) {
+            println!("Sender Speed: {} PPS", count);
+            count = 0;
+            last_log = Instant::now();
         }
     }
 }
