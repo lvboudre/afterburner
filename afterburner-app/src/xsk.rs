@@ -1,4 +1,3 @@
-use std::alloc::{alloc, Layout};
 use std::ffi::CString;
 use std::mem;
 use std::os::fd::RawFd;
@@ -6,9 +5,10 @@ use std::ptr;
 use std::sync::atomic::{AtomicU32, Ordering};
 use anyhow::{anyhow, Result};
 use libc::{
-    mmap, setsockopt, socket, AF_XDP, MAP_FAILED, MAP_POPULATE, MAP_SHARED, PROT_READ,
-    PROT_WRITE, SOCK_RAW, SOL_XDP, XDP_COPY, XDP_MMAP_OFFSETS, XDP_PGOFF_RX_RING,
-    XDP_RX_RING, XDP_TX_RING, XDP_UMEM_COMPLETION_RING, XDP_UMEM_FILL_RING,
+    close, mmap, munmap, setsockopt, socket, AF_XDP, MAP_ANONYMOUS, MAP_FAILED,
+    MAP_HUGETLB, MAP_POPULATE, MAP_PRIVATE, MAP_SHARED, PROT_READ, PROT_WRITE,
+    SOCK_RAW, SOL_XDP, XDP_COPY, XDP_MMAP_OFFSETS, XDP_PGOFF_RX_RING, XDP_RX_RING,
+    XDP_TX_RING, XDP_UMEM_COMPLETION_RING, XDP_UMEM_FILL_RING,
     XDP_UMEM_PGOFF_COMPLETION_RING, XDP_UMEM_PGOFF_FILL_RING, XDP_UMEM_REG,
 };
 
@@ -17,6 +17,43 @@ const UMEM_SIZE: usize = 8 * 1024 * 1024;
 const FRAME_SIZE: usize = 4096;
 const NUM_FRAMES: usize = UMEM_SIZE / FRAME_SIZE;
 const RING_SIZE: u32 = 2048;
+
+/// Allocate UMEM buffer using mmap, attempting HUGETLB for better TLB performance.
+/// Falls back to regular pages if huge pages are unavailable.
+unsafe fn allocate_umem(size: usize) -> Result<*mut u8> {
+    // Try with HUGETLB first (2MB pages reduce TLB entries from 2048 to 4 for 8MB)
+    let ptr = mmap(
+        ptr::null_mut(),
+        size,
+        PROT_READ | PROT_WRITE,
+        MAP_PRIVATE | MAP_ANONYMOUS | MAP_HUGETLB | MAP_POPULATE,
+        -1,
+        0,
+    );
+
+    if ptr != MAP_FAILED {
+        return Ok(ptr as *mut u8);
+    }
+
+    // Fallback to regular pages if HUGETLB fails
+    eprintln!("[afterburner] HUGETLB allocation failed, falling back to regular pages. \
+               For optimal performance, configure huge pages: echo 64 | sudo tee /proc/sys/vm/nr_hugepages");
+
+    let ptr = mmap(
+        ptr::null_mut(),
+        size,
+        PROT_READ | PROT_WRITE,
+        MAP_PRIVATE | MAP_ANONYMOUS | MAP_POPULATE,
+        -1,
+        0,
+    );
+
+    if ptr == MAP_FAILED {
+        return Err(anyhow!("Failed to allocate UMEM: {}", std::io::Error::last_os_error()));
+    }
+
+    Ok(ptr as *mut u8)
+}
 
 #[repr(C)]
 struct XdpDesc {
@@ -65,8 +102,7 @@ struct XdpRing {
 pub struct XdpSocket {
     pub umem_ptr: *mut u8,
     pub fd: RawFd,
-    #[allow(dead_code)]
-    umem_layout: Layout,
+    umem_size: usize,
     rx_ring: XdpRing,
     tx_ring: XdpRing,
     fill_ring: XdpRing,
@@ -82,10 +118,8 @@ impl XdpSocket {
             let fd = socket(AF_XDP, SOCK_RAW, 0);
             if fd < 0 { return Err(anyhow!("Failed to create socket")); }
 
-            // 2. UMEM
-            let layout = Layout::from_size_align(UMEM_SIZE, 4096)?;
-            let umem_ptr = alloc(layout);
-            ptr::write_bytes(umem_ptr, 0, UMEM_SIZE);
+            // 2. UMEM (using mmap with HUGETLB for better TLB performance)
+            let umem_ptr = allocate_umem(UMEM_SIZE)?;
 
             let mr = XdpUmemReg {
                 addr: umem_ptr as u64, len: UMEM_SIZE as u64, chunk_size: FRAME_SIZE as u32, headroom: 0, flags: 0,
@@ -183,7 +217,7 @@ impl XdpSocket {
             }
 
             Ok(XdpSocket {
-                fd, umem_ptr, umem_layout: layout, rx_ring, tx_ring, fill_ring, comp_ring,
+                fd, umem_ptr, umem_size: UMEM_SIZE, rx_ring, tx_ring, fill_ring, comp_ring,
                 tx_free_frames, pending_tx_addr: None,
             })
         }
@@ -250,6 +284,24 @@ impl XdpSocket {
     pub fn cancel_tx(&mut self) {
         if let Some(addr) = self.pending_tx_addr.take() {
             self.tx_free_frames.push(addr);
+        }
+    }
+}
+
+impl Drop for XdpSocket {
+    fn drop(&mut self) {
+        unsafe {
+            // Unmap ring buffers
+            munmap(self.fill_ring.ptr, self.fill_ring.len);
+            munmap(self.comp_ring.ptr, self.comp_ring.len);
+            munmap(self.rx_ring.ptr, self.rx_ring.len);
+            munmap(self.tx_ring.ptr, self.tx_ring.len);
+
+            // Unmap UMEM buffer
+            munmap(self.umem_ptr as *mut libc::c_void, self.umem_size);
+
+            // Close socket
+            close(self.fd);
         }
     }
 }
