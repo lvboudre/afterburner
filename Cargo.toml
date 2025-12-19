@@ -6,6 +6,9 @@ members = [
     "xtask",
 ]
 
+[workspace.package]
+edition = "2021"
+
 resolver = "2"
 
 [profile.dev]
@@ -28,7 +31,7 @@ clap = { version = "4.0", features = ["derive"] }
 env_logger = "0.10"
 libc = "0.2"
 tokio = { version = "1.28", features = ["full"] }
-serde = { version = "1", features = ["derive"], default-features = false }
+serde = { version = "1", default-features = false }
 signal-hook = "0.3"
 
 # QUIC Stack 
