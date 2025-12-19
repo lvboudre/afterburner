@@ -1,4 +1,12 @@
+<div align="center">
+
 # Afterburner
+
+</div>
+
+<p align="center">
+ <img alt="afterburner_img" src="https://github.com/user-attachments/assets/eb58676f-6360-4ce0-8594-e4365436bc4f" height="257"/>
+</p>
 
 **Afterburner** is a **Solana Kernel-Bypass QUIC Driver** built in Rust. It utilizes **eBPF** and **AF_XDP** to bypass the Linux kernel networking stack, achieving **sub-100µs latency** and **4.7 Million TPS** throughput with zero-copy packet processing.
 
